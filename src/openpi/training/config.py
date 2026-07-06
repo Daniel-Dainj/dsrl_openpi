@@ -10,6 +10,7 @@ from typing import Any, Protocol, TypeAlias
 
 import etils.epath as epath
 import flax.nnx as nnx
+import numpy as np
 from typing_extensions import override
 import tyro
 
@@ -170,6 +171,37 @@ class DataConfigFactory(abc.ABC):
         return None
 
 
+def _pad_norm_stats_array(array: np.ndarray | None, target_dim: int) -> np.ndarray | None:
+    if array is None:
+        return None
+    array = np.asarray(array, dtype=np.float32)
+    return _transforms.pad_to_dim(array, target_dim)
+
+
+def _pad_norm_stats_entry(stats: _transforms.NormStats, target_dim: int) -> _transforms.NormStats:
+    mean = _pad_norm_stats_array(stats.mean, target_dim)
+    std = _pad_norm_stats_array(stats.std, target_dim)
+    q01 = _pad_norm_stats_array(stats.q01, target_dim)
+    q99 = _pad_norm_stats_array(stats.q99, target_dim)
+    return _transforms.NormStats(mean=mean, std=std, q01=q01, q99=q99)
+
+
+def _maybe_pad_droid_norm_stats(
+    norm_stats: dict[str, _transforms.NormStats] | None, target_dim: int
+) -> dict[str, _transforms.NormStats] | None:
+    if norm_stats is None:
+        return None
+
+    updated = dict(norm_stats)
+    for key in ("state", "actions"):
+        stats = updated.get(key)
+        if stats is None:
+            continue
+        if len(np.asarray(stats.mean).reshape(-1)) != target_dim:
+            updated[key] = _pad_norm_stats_entry(stats, target_dim)
+    return updated
+
+
 @dataclasses.dataclass(frozen=True)
 class FakeDataConfig(DataConfigFactory):
     repo_id: str = "fake"
@@ -273,6 +305,7 @@ class LeRobotDroidDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        base_config = self.create_base_config(assets_dirs)
         data_transforms = _transforms.Group(
             inputs=[droid_policy.DroidInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
             outputs=[droid_policy.DroidOutputs()],
@@ -280,7 +313,8 @@ class LeRobotDroidDataConfig(DataConfigFactory):
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
 
         return dataclasses.replace(
-            self.create_base_config(assets_dirs),
+            base_config,
+            norm_stats=_maybe_pad_droid_norm_stats(base_config.norm_stats, model_config.action_dim),
             repack_transforms=self.repack_transforms,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
@@ -560,6 +594,48 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_fast_base/params"),
+        num_train_steps=20_000,
+    ),
+    TrainConfig(
+        name="pi0_pickup_workpiece_local_stats",
+        model=pi0.Pi0Config(action_horizon=10),
+        data=LeRobotDroidDataConfig(
+            repo_id="local/pickup_workpiece",
+            default_prompt="pick up the workpiece",
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        batch_size=8,
+        num_workers=2,
+        num_train_steps=20_000,
+    ),
+    TrainConfig(
+        name="pi0_pickup_workpiece_local_stats_low_mem_finetune",
+        model=pi0.Pi0Config(
+            action_horizon=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotDroidDataConfig(
+            repo_id="local/pickup_workpiece",
+            default_prompt="pick up the workpiece",
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        freeze_filter=pi0.Pi0Config(
+            action_horizon=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+        batch_size=1,
+        num_workers=1,
         num_train_steps=20_000,
     ),
     #

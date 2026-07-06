@@ -11,25 +11,15 @@ cd openpi
 uv run examples/droid/convert_droid_h5_to_lerobot.py \
   --raw-dir ../data/panda_raw_episodes_grasp_workpiece_necessary_h5 \
   --repo-id local/pickup_workpiece \
-  --task "pick up the workpiece" \
+  --task "pickup workpiece" \
   --overwrite
 ```
 
-This writes a local LeRobot dataset under `$LEROBOT_HOME/local/pickup_workpiece`.
+This writes a local LeRobot dataset under `$HF_LEROBOT_HOME/local/pickup_workpiece` when that env var is set, or under the default LeRobot cache root otherwise.
 
-## 2. Fine-tune with pretraining DROID norm stats
+## 2. Fine-tune from `pi0_base`
 
-This is the best first run when the robot/action space matches Franka+DROID conventions.
-
-```bash
-cd openpi
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
-uv run scripts/train.py pi0_fast_pickup_workpiece \
-  --exp-name=pickup_workpiece_ft \
-  --overwrite
-```
-
-You can also train the non-FAST model:
+This matches the top-level `README.md` recommendation: start from `pi0_base`, then switch to FAST only if you specifically want that architecture.
 
 ```bash
 cd openpi
@@ -39,9 +29,31 @@ uv run scripts/train.py pi0_pickup_workpiece \
   --overwrite
 ```
 
+If you want the FAST variant for a second run:
+
+```bash
+cd openpi
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+uv run scripts/train.py pi0_fast_pickup_workpiece \
+  --exp-name=pickup_workpiece_ft_fast \
+  --overwrite
+```
+
 ## 3. Optional: recompute norm stats from your own dataset
 
 If the reused DROID normalization stats underperform, compute fresh stats from the local dataset and train with the local-stats config:
+
+```bash
+cd openpi
+uv run scripts/compute_norm_stats.py --config-name pi0_pickup_workpiece_local_stats
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+uv run scripts/train.py pi0_pickup_workpiece_local_stats \
+  --exp-name=pickup_workpiece_ft_pi0_local_stats \
+  --overwrite
+```
+
+If you specifically want the FAST variant instead, use:
 
 ```bash
 cd openpi
@@ -49,7 +61,7 @@ uv run scripts/compute_norm_stats.py --config-name pi0_fast_pickup_workpiece_loc
 
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
 uv run scripts/train.py pi0_fast_pickup_workpiece_local_stats \
-  --exp-name=pickup_workpiece_ft_local_stats \
+  --exp-name=pickup_workpiece_ft_fast_local_stats \
   --overwrite
 ```
 
@@ -61,11 +73,11 @@ Example for a checkpoint saved at step `20000`:
 cd openpi
 uv run scripts/serve_policy.py \
   policy:checkpoint \
-  --policy.config=pi0_fast_pickup_workpiece \
-  --policy.dir=checkpoints/pi0_fast_pickup_workpiece/pickup_workpiece_ft/20000
+  --policy.config=pi0_pickup_workpiece_local_stats \
+  --policy.dir=checkpoints/pi0_pickup_workpiece_local_stats/pickup_workpiece_ft_pi0_local_stats/20000
 ```
 
-If you trained with `pi0_fast_pickup_workpiece_local_stats`, use that same config name when serving.
+If you trained with a different config like `pi0_pickup_workpiece`, `pi0_fast_pickup_workpiece`, or `pi0_fast_pickup_workpiece_local_stats`, use that same config name and checkpoint directory when serving.
 
 ## 5. Use the fine-tuned policy with DSRL real-robot training
 

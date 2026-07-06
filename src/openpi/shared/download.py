@@ -27,14 +27,28 @@ logger = logging.getLogger(__name__)
 
 
 def get_cache_dir() -> pathlib.Path:
-    default_dir = "~/.cache/openpi"
-    if os.path.exists("/mnt/weka"):  # noqa: PTH110
-        default_dir = f"/mnt/weka/{getpass.getuser()}/.cache/openpi"
+    if configured_dir := os.getenv(_OPENPI_DATA_HOME):
+        candidates = [configured_dir]
+    else:
+        default_dir = "~/.cache/openpi"
+        if os.path.exists("/mnt/weka"):  # noqa: PTH110
+            default_dir = f"/mnt/weka/{getpass.getuser()}/.cache/openpi"
+        repo_cache_dir = pathlib.Path(__file__).resolve().parents[3] / ".cache" / "openpi"
+        candidates = [default_dir, repo_cache_dir]
 
-    cache_dir = pathlib.Path(os.getenv(_OPENPI_DATA_HOME, default_dir)).expanduser().resolve()
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    _set_folder_permission(cache_dir)
-    return cache_dir
+    last_error: OSError | None = None
+    for candidate in candidates:
+        cache_dir = pathlib.Path(candidate).expanduser().resolve()
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            _set_folder_permission(cache_dir)
+            return cache_dir
+        except OSError as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Failed to resolve OpenPI cache directory.")
 
 
 def maybe_download(url: str, *, force_download: bool = False, **kwargs) -> pathlib.Path:
@@ -302,7 +316,7 @@ def _is_openpi_url(url: str) -> bool:
 
 def _get_mtime(year: int, month: int, day: int) -> float:
     """Get the mtime of a given date at midnight UTC."""
-    date = datetime.datetime(year, month, day, tzinfo=datetime.UTC)
+    date = datetime.datetime(year, month, day, tzinfo=datetime.timezone.utc)
     return time.mktime(date.timetuple())
 
 

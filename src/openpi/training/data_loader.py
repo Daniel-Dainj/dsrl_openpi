@@ -1,11 +1,18 @@
 from collections.abc import Iterator, Sequence
+import inspect
 import multiprocessing
 import os
+from pathlib import Path
 import typing
 from typing import Protocol, SupportsIndex, TypeVar
 
 import jax
 import jax.numpy as jnp
+
+_HF_CACHE_HOME = (Path(__file__).resolve().parents[3] / ".cache" / "huggingface").resolve()
+os.environ.setdefault("HF_HOME", str(_HF_CACHE_HOME))
+os.environ.setdefault("HF_DATASETS_CACHE", str(_HF_CACHE_HOME / "datasets"))
+
 import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
@@ -81,6 +88,43 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+def _find_lerobot_root() -> Path | None:
+    if root := os.environ.get("HF_LEROBOT_HOME"):
+        path = Path(root).expanduser().resolve()
+        if path.exists():
+            return path
+
+    if root := os.environ.get("LEROBOT_HOME"):
+        path = Path(root).expanduser().resolve()
+        if path.exists():
+            return path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    candidates = (
+        repo_root.parent / "data" / "datasets" / "lerobot",
+        repo_root / "data" / "datasets" / "lerobot",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+def _ensure_huggingface_cache() -> None:
+    Path(os.environ["HF_HOME"]).mkdir(parents=True, exist_ok=True)
+    Path(os.environ["HF_DATASETS_CACHE"]).mkdir(parents=True, exist_ok=True)
+
+
+def _call_lerobot(cls_or_fn, /, **kwargs):
+    supported = inspect.signature(cls_or_fn).parameters
+    filtered_kwargs = {k: v for k, v in kwargs.items() if k in supported and v is not None}
+    return cls_or_fn(**filtered_kwargs)
+
+
+def _supports_lerobot_kwarg(cls_or_fn, kwarg: str) -> bool:
+    return kwarg in inspect.signature(cls_or_fn).parameters
+
+
 def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseModelConfig) -> Dataset:
     """Create a dataset for training."""
     repo_id = data_config.repo_id
@@ -89,14 +133,37 @@ def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseMod
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, local_files_only=data_config.local_files_only)
-    dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(model_config.action_horizon)]
-            for key in data_config.action_sequence_keys
-        },
-        local_files_only=data_config.local_files_only,
+    _ensure_huggingface_cache()
+    root = _find_lerobot_root() if data_config.local_files_only else None
+    metadata_kwargs = {
+        "repo_id": repo_id,
+        "local_files_only": data_config.local_files_only,
+    }
+    dataset_kwargs = {
+        "repo_id": data_config.repo_id,
+        "local_files_only": data_config.local_files_only,
+    }
+
+    if root is not None:
+        if _supports_lerobot_kwarg(lerobot_dataset.LeRobotDatasetMetadata, "local_files_only"):
+            metadata_kwargs["root"] = root
+            dataset_kwargs["root"] = root
+        else:
+            dataset_root = root / repo_id
+            metadata_kwargs["root"] = dataset_root
+            dataset_kwargs["root"] = dataset_root
+
+    dataset_meta = _call_lerobot(
+        lerobot_dataset.LeRobotDatasetMetadata,
+        **metadata_kwargs,
+    )
+    dataset_kwargs["delta_timestamps"] = {
+        key: [t / dataset_meta.fps for t in range(model_config.action_horizon)]
+        for key in data_config.action_sequence_keys
+    }
+    dataset = _call_lerobot(
+        lerobot_dataset.LeRobotDataset,
+        **dataset_kwargs,
     )
 
     if data_config.prompt_from_task:

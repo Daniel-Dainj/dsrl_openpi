@@ -14,6 +14,7 @@ import dataclasses
 import os
 from pathlib import Path
 import shutil
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import h5py
 from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
@@ -34,6 +35,7 @@ class Args:
     convert_bgr_to_rgb: bool = False
     image_writer_processes: int = max(1, min(8, (os.cpu_count() or 4) // 2))
     image_writer_threads: int = 4
+    prefetch_episodes: int = 4
     overwrite: bool = False
 
 
@@ -250,6 +252,51 @@ def _make_dataset(
     )
 
 
+def _append_episode_fast(
+    dataset: LeRobotDataset,
+    *,
+    task: str,
+    base_images: np.ndarray,
+    wrist_images: np.ndarray,
+    joint_position: np.ndarray,
+    gripper_position: np.ndarray,
+    action: np.ndarray,
+) -> None:
+    episode_buffer = dataset.create_episode_buffer()
+    episode_index = episode_buffer["episode_index"]
+    num_frames = len(action)
+
+    episode_buffer["size"] = num_frames
+    episode_buffer["task"] = [task] * num_frames
+    episode_buffer["frame_index"] = list(range(num_frames))
+    episode_buffer["timestamp"] = [i / dataset.fps for i in range(num_frames)]
+    episode_buffer["observation.joint_position"] = [frame for frame in joint_position]
+    episode_buffer["observation.gripper_position"] = [frame for frame in gripper_position]
+    episode_buffer["action"] = [frame for frame in action]
+
+    image_streams = {
+        "observation.images.exterior_image_1_left": base_images,
+        "observation.images.wrist_image_left": wrist_images,
+    }
+    for image_key, image_batch in image_streams.items():
+        first_path = dataset._get_image_file_path(episode_index=episode_index, image_key=image_key, frame_index=0)
+        first_path.parent.mkdir(parents=True, exist_ok=True)
+
+        image_paths: list[str] = []
+        for frame_index, image in enumerate(image_batch):
+            image_path = dataset._get_image_file_path(
+                episode_index=episode_index,
+                image_key=image_key,
+                frame_index=frame_index,
+            )
+            dataset._save_image(image, image_path)
+            image_paths.append(str(image_path))
+        episode_buffer[image_key] = image_paths
+
+    dataset.episode_buffer = episode_buffer
+    dataset.save_episode()
+
+
 def main(args: Args) -> None:
     if not args.raw_dir.exists():
         raise FileNotFoundError(f"Raw data directory not found: {args.raw_dir}")
@@ -276,27 +323,44 @@ def main(args: Args) -> None:
         image_writer_threads=args.image_writer_threads,
     )
 
-    for episode_path in tqdm.tqdm(episode_paths, desc="Converting episodes"):
-        base_images, wrist_images, joint_position, gripper_position, action = _load_episode(
-            episode_path,
-            convert_bgr_to_rgb=args.convert_bgr_to_rgb,
-        )
+    prefetch = max(1, args.prefetch_episodes)
+    with ThreadPoolExecutor(max_workers=prefetch) as executor:
+        in_flight: dict[int, Future[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]] = {}
 
-        for i in range(len(action)):
-            dataset.add_frame(
-                {
-                    "task": args.task,
-                    "observation.images.exterior_image_1_left": base_images[i],
-                    "observation.images.wrist_image_left": wrist_images[i],
-                    "observation.joint_position": joint_position[i],
-                    "observation.gripper_position": gripper_position[i],
-                    "action": action[i],
-                }
+        submit_upto = min(prefetch, len(episode_paths))
+        for idx in range(submit_upto):
+            in_flight[idx] = executor.submit(
+                _load_episode,
+                episode_paths[idx],
+                convert_bgr_to_rgb=args.convert_bgr_to_rgb,
             )
 
-        dataset.save_episode()
+        next_to_submit = submit_upto
+        for idx, episode_path in enumerate(tqdm.tqdm(episode_paths, desc="Converting episodes")):
+            base_images, wrist_images, joint_position, gripper_position, action = in_flight.pop(idx).result()
 
-    dataset.consolidate(run_compute_stats=False)
+            if next_to_submit < len(episode_paths):
+                in_flight[next_to_submit] = executor.submit(
+                    _load_episode,
+                    episode_paths[next_to_submit],
+                    convert_bgr_to_rgb=args.convert_bgr_to_rgb,
+                )
+                next_to_submit += 1
+
+            _append_episode_fast(
+                dataset,
+                task=args.task,
+                base_images=base_images,
+                wrist_images=wrist_images,
+                joint_position=joint_position,
+                gripper_position=gripper_position,
+                action=action,
+            )
+
+    if hasattr(dataset, "consolidate"):
+        dataset.consolidate(run_compute_stats=False)
+    else:
+        print("LeRobotDataset.consolidate() is unavailable in this lerobot version; skipping final consolidate step.")
     print(f"Saved LeRobot dataset to: {output_path}")
 
 

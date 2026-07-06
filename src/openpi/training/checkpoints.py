@@ -44,7 +44,8 @@ def initialize_checkpoint_dir(
             max_to_keep=1,
             keep_period=keep_period,
             create=False,
-            async_options=ocp.AsyncOptions(timeout_secs=7200),
+            cleanup_tmp_directories=True,
+            enable_async_checkpointing=False,
         ),
     )
 
@@ -64,6 +65,8 @@ def save_state(
     data_loader: _data_loader.DataLoader,
     step: int,
 ):
+    _cleanup_step_tmp_dirs(checkpoint_manager, step)
+
     def save_assets(directory: epath.Path):
         # Save the normalization stats.
         data_config = data_loader.data_config()
@@ -80,6 +83,13 @@ def save_state(
         "params": {"params": params},
     }
     checkpoint_manager.save(step, items)
+
+
+def _cleanup_step_tmp_dirs(checkpoint_manager: ocp.CheckpointManager, step: int) -> None:
+    checkpoint_dir = epath.Path(checkpoint_manager.directory)
+    for tmp_dir in checkpoint_dir.glob(f"{step}.orbax-checkpoint-tmp-*"):
+        logging.warning("Removing stale checkpoint temp directory before save: %s", tmp_dir)
+        tmp_dir.rmtree()
 
 
 def restore_state(

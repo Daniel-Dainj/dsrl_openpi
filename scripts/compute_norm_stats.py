@@ -5,10 +5,15 @@ will compute the mean and standard deviation of the data in the dataset and save
 to the config assets directory.
 """
 
+import dataclasses
+
 import numpy as np
 import tqdm
 import tyro
 
+import openpi.policies.aloha_policy as aloha_policy
+import openpi.policies.droid_policy as droid_policy
+import openpi.policies.libero_policy as libero_policy
 import openpi.shared.normalize as normalize
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
@@ -20,8 +25,84 @@ class RemoveStrings(transforms.DataTransformFn):
         return {k: v for k, v in x.items() if not np.issubdtype(np.asarray(v).dtype, np.str_)}
 
 
+def _create_stats_data_config(config: _config.TrainConfig) -> _config.DataConfig:
+    factory = config.data
+
+    if isinstance(factory, _config.LeRobotDroidDataConfig):
+        return dataclasses.replace(
+            factory.create_base_config(config.assets_dirs),
+            repack_transforms=factory.repack_transforms,
+            data_transforms=transforms.Group(
+                inputs=[
+                    droid_policy.DroidInputs(
+                        action_dim=config.model.action_dim,
+                        model_type=config.model.model_type,
+                    )
+                ],
+                outputs=[droid_policy.DroidOutputs()],
+            ),
+            action_sequence_keys=factory.action_sequence_keys,
+        )
+
+    if isinstance(factory, _config.LeRobotAlohaDataConfig):
+        data_transforms = transforms.Group(
+            inputs=[aloha_policy.AlohaInputs(action_dim=config.model.action_dim, adapt_to_pi=factory.adapt_to_pi)],
+            outputs=[aloha_policy.AlohaOutputs(adapt_to_pi=factory.adapt_to_pi)],
+        )
+        if factory.use_delta_joint_actions:
+            delta_action_mask = transforms.make_bool_mask(6, -1, 6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[transforms.DeltaActions(delta_action_mask)],
+                outputs=[transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        return dataclasses.replace(
+            factory.create_base_config(config.assets_dirs),
+            repack_transforms=factory.repack_transforms,
+            data_transforms=data_transforms,
+            action_sequence_keys=factory.action_sequence_keys,
+        )
+
+    if isinstance(factory, _config.LeRobotLiberoDataConfig):
+        delta_action_mask = transforms.make_bool_mask(6, -1)
+        data_transforms = transforms.Group(
+            inputs=[libero_policy.LiberoInputs(action_dim=config.model.action_dim, model_type=config.model.model_type)],
+            outputs=[libero_policy.LiberoOutputs()],
+        ).push(
+            inputs=[transforms.DeltaActions(delta_action_mask)],
+            outputs=[transforms.AbsoluteActions(delta_action_mask)],
+        )
+        repack_transform = transforms.Group(
+            inputs=[
+                transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+        return dataclasses.replace(
+            factory.create_base_config(config.assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+        )
+
+    if isinstance(factory, _config.SimpleDataConfig):
+        return dataclasses.replace(
+            factory.create_base_config(config.assets_dirs),
+            data_transforms=factory.data_transforms(config.model),
+            use_quantile_norm=config.model.model_type == _config.ModelType.PI0_FAST,
+        )
+
+    return factory.create(config.assets_dirs, config.model)
+
+
 def create_dataset(config: _config.TrainConfig) -> tuple[_config.DataConfig, _data_loader.Dataset]:
-    data_config = config.data.create(config.assets_dirs, config.model)
+    data_config = _create_stats_data_config(config)
     if data_config.repo_id is None:
         raise ValueError("Data config must have a repo_id")
     dataset = _data_loader.create_dataset(data_config, config.model)

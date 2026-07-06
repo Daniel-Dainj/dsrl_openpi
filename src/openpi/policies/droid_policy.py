@@ -27,6 +27,10 @@ def _parse_image(image) -> np.ndarray:
     return image
 
 
+def _as_vector(value) -> np.ndarray:
+    return np.asarray(value, dtype=np.float32).reshape(-1)
+
+
 @dataclasses.dataclass(frozen=True)
 class DroidInputs(transforms.DataTransformFn):
     # The action dimension of the model. Will be used to pad state and actions.
@@ -36,7 +40,9 @@ class DroidInputs(transforms.DataTransformFn):
     model_type: _model.ModelType = _model.ModelType.PI0
 
     def __call__(self, data: dict) -> dict:
-        state = np.concatenate([data["observation/joint_position"], data["observation/gripper_position"]])
+        joint_position = _as_vector(data["observation/joint_position"])
+        gripper_position = _as_vector(data["observation/gripper_position"])
+        state = np.concatenate([joint_position, gripper_position])
         state = transforms.pad_to_dim(state, self.action_dim)
 
         # Possibly need to parse images to uint8 (H,W,C) since LeRobot automatically
@@ -64,7 +70,7 @@ class DroidInputs(transforms.DataTransformFn):
         }
 
         if "actions" in data:
-            inputs["actions"] = data["actions"]
+            inputs["actions"] = transforms.pad_to_dim(np.asarray(data["actions"], dtype=np.float32), self.action_dim)
 
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
