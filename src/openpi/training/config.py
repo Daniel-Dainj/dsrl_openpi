@@ -250,6 +250,45 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotDroidDataConfig(DataConfigFactory):
+    # If provided, will be injected into the input data if the dataset task prompt is missing.
+    default_prompt: str | None = None
+
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/exterior_image_1_left": "observation.images.exterior_image_1_left",
+                        "observation/wrist_image_left": "observation.images.wrist_image_left",
+                        "observation/joint_position": "observation.joint_position",
+                        "observation/gripper_position": "observation.gripper_position",
+                        "actions": "action",
+                    }
+                )
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[droid_policy.DroidInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[droid_policy.DroidOutputs()],
+        )
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class LeRobotLiberoDataConfig(DataConfigFactory):
     """
     This config is used to configure transforms that are applied at various parts of the data pipeline.
@@ -469,6 +508,59 @@ _CONFIGS = [
                 prompt_from_task=True,
             ),
         ),
+    ),
+    #
+    # Fine-tuning Franka / DROID-style real robot configs.
+    #
+    TrainConfig(
+        name="pi0_pickup_workpiece",
+        model=pi0.Pi0Config(action_horizon=10),
+        data=LeRobotDroidDataConfig(
+            repo_id="local/pickup_workpiece",
+            assets=AssetsConfig(
+                assets_dir="s3://openpi-assets/checkpoints/pi0_base/assets",
+                asset_id="droid",
+            ),
+            default_prompt="pick up the workpiece",
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=20_000,
+    ),
+    TrainConfig(
+        name="pi0_fast_pickup_workpiece",
+        model=pi0_fast.Pi0FASTConfig(action_dim=8, action_horizon=10, max_token_len=180),
+        data=LeRobotDroidDataConfig(
+            repo_id="local/pickup_workpiece",
+            assets=AssetsConfig(
+                assets_dir="s3://openpi-assets/checkpoints/pi0_fast_base/assets",
+                asset_id="droid",
+            ),
+            default_prompt="pick up the workpiece",
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_fast_base/params"),
+        num_train_steps=20_000,
+    ),
+    TrainConfig(
+        name="pi0_fast_pickup_workpiece_local_stats",
+        model=pi0_fast.Pi0FASTConfig(action_dim=8, action_horizon=10, max_token_len=180),
+        data=LeRobotDroidDataConfig(
+            repo_id="local/pickup_workpiece",
+            default_prompt="pick up the workpiece",
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_fast_base/params"),
+        num_train_steps=20_000,
     ),
     #
     # Fine-tuning Libero configs.
